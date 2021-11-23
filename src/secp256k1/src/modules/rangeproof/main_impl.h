@@ -14,15 +14,15 @@
 #include "modules/rangeproof/rangeproof_impl.h"
 
 /** Alternative generator for secp256k1.
- *  This is the sha256 of 'g' after DER encoding (without compression),
+ *  This is the sha256 of 'g' after standard encoding (without compression),
  *  which happens to be a point on the curve. More precisely, the generator is
  *  derived by running the following script with the sage mathematics software.
 
     import hashlib
     F = FiniteField (0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F)
-    G_DER = '0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8'
-    G2 = EllipticCurve ([F (0), F (7)]).lift_x(F(int(hashlib.sha256(G_DER.decode('hex')).hexdigest(),16)))
-    print('%x %x' % G2.xy())
+    G = '0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8'
+    H = EllipticCurve ([F (0), F (7)]).lift_x(F(int(hashlib.sha256(G.decode('hex')).hexdigest(),16)))
+    print('%x %x' % H.xy())
  */
 static const secp256k1_generator secp256k1_generator_h_internal = {{
     0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a, 0x5e,
@@ -182,7 +182,15 @@ int secp256k1_pedersen_blind_generator_blind_sum(const secp256k1_context* ctx, c
     }
 
     secp256k1_scalar_set_int(&sum, 0);
-    for (i = 0; i < n_total; i++) {
+
+    /* Here, n_total > 0. Thus the loop runs at least once.
+       Thus we may use a do-while loop, which checks the loop
+       condition only at the end.
+
+       The do-while loop helps GCC prove that the loop runs at least
+       once and suppresses a -Wmaybe-uninitialized warning. */
+    i = 0;
+    do {
         int overflow = 0;
         secp256k1_scalar addend;
         secp256k1_scalar_set_u64(&addend, value[i]);  /* s = v */
@@ -207,7 +215,9 @@ int secp256k1_pedersen_blind_generator_blind_sum(const secp256k1_context* ctx, c
         secp256k1_scalar_cond_negate(&addend, i < n_inputs);  /* s is negated if it's an input */
         secp256k1_scalar_add(&sum, &sum, &addend);    /* sum += s */
         secp256k1_scalar_clear(&addend);
-    }
+
+        i++;
+    } while (i < n_total);
 
     /* Right now tmp has the last pedersen blinding factor. Subtract the sum from it. */
     secp256k1_scalar_negate(&sum, &sum);

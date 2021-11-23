@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2018 The Bitcoin Core developers
+// Copyright (c) 2014-2019 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -7,11 +7,11 @@
 
 #include <assert.h>
 #include <string.h>
-#include <atomic>
+
+#include <compat/cpuid.h>
 
 #if defined(__x86_64__) || defined(__amd64__) || defined(__i386__)
 #if defined(USE_ASM)
-#include <cpuid.h>
 namespace sha256_sse4
 {
 void Transform(uint32_t* s, const unsigned char* chunk, size_t blocks);
@@ -547,18 +547,7 @@ bool SelfTest() {
     return true;
 }
 
-
 #if defined(USE_ASM) && (defined(__x86_64__) || defined(__amd64__) || defined(__i386__))
-// We can't use cpuid.h's __get_cpuid as it does not support subleafs.
-void inline cpuid(uint32_t leaf, uint32_t subleaf, uint32_t& a, uint32_t& b, uint32_t& c, uint32_t& d)
-{
-#ifdef __GNUC__
-    __cpuid_count(leaf, subleaf, a, b, c, d);
-#else
-  __asm__ ("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "0"(leaf), "2"(subleaf));
-#endif
-}
-
 /** Check whether the OS has enabled AVX registers. */
 bool AVXEnabled()
 {
@@ -573,7 +562,7 @@ bool AVXEnabled()
 std::string SHA256AutoDetect()
 {
     std::string ret = "standard";
-#if defined(USE_ASM) && (defined(__x86_64__) || defined(__amd64__) || defined(__i386__))
+#if defined(USE_ASM) && defined(HAVE_GETCPUID)
     bool have_sse4 = false;
     bool have_xsave = false;
     bool have_avx = false;
@@ -590,7 +579,7 @@ std::string SHA256AutoDetect()
     (void)enabled_avx;
 
     uint32_t eax, ebx, ecx, edx;
-    cpuid(1, 0, eax, ebx, ecx, edx);
+    GetCPUID(1, 0, eax, ebx, ecx, edx);
     have_sse4 = (ecx >> 19) & 1;
     have_xsave = (ecx >> 27) & 1;
     have_avx = (ecx >> 28) & 1;
@@ -598,7 +587,7 @@ std::string SHA256AutoDetect()
         enabled_avx = AVXEnabled();
     }
     if (have_sse4) {
-        cpuid(7, 0, eax, ebx, ecx, edx);
+        GetCPUID(7, 0, eax, ebx, ecx, edx);
         have_avx2 = (ebx >> 5) & 1;
         have_shani = (ebx >> 29) & 1;
     }
@@ -714,6 +703,59 @@ void CSHA256::Midstate(unsigned char hash[OUTPUT_SIZE], uint64_t* len, unsigned 
     if (buffer) {
         memcpy(buffer, buf, bytes % 64);
     }
+}
+
+std::vector<unsigned char> CSHA256::Save() const {
+    size_t buf_size = bytes % 64;
+    std::vector<unsigned char> result(40 + buf_size);
+
+    WriteBE32(&result[ 0], s[0]);
+    WriteBE32(&result[ 4], s[1]);
+    WriteBE32(&result[ 8], s[2]);
+    WriteBE32(&result[12], s[3]);
+    WriteBE32(&result[16], s[4]);
+    WriteBE32(&result[20], s[5]);
+    WriteBE32(&result[24], s[6]);
+    WriteBE32(&result[28], s[7]);
+
+    WriteLE64(&result[32], bytes << 3);
+
+    if (buf_size) memcpy(&result[40], buf, buf_size);
+
+    return result;
+}
+
+bool CSHA256::Load(const std::vector<unsigned char>& vch) {
+    if (vch.size() < 40) return false;
+
+    uint64_t bits = ReadLE64(&vch[32]);
+    size_t buf_size = (bits >> 3) % 64;
+
+    if ((bits & 0x07) != 0 || vch.size() != 40 + buf_size) return false;
+
+    // We want to leave the internal state of the object unchanged if false is returned.
+    // So no member variables can be modified until now.
+
+    s[0] = ReadBE32(&vch[ 0]);
+    s[1] = ReadBE32(&vch[ 4]);
+    s[2] = ReadBE32(&vch[ 8]);
+    s[3] = ReadBE32(&vch[12]);
+    s[4] = ReadBE32(&vch[16]);
+    s[5] = ReadBE32(&vch[20]);
+    s[6] = ReadBE32(&vch[24]);
+    s[7] = ReadBE32(&vch[28]);
+
+    bytes = bits >> 3;
+    if (buf_size) memcpy(buf, &vch[40], buf_size);
+
+    return true;
+}
+
+bool CSHA256::SafeWrite(const unsigned char* data, size_t len) {
+  const uint64_t SHA256_MAX = 0x1FFFFFFFFFFFFFFF; // SHA256's maximum allowed message length in bytes.
+  if (SHA256_MAX < bytes || SHA256_MAX - bytes < len) return false;
+  Write(data, len);
+  return true;
 }
 
 CSHA256& CSHA256::Reset()

@@ -185,7 +185,7 @@ static bool CheckPeginTx(const std::vector<unsigned char>& tx_data, T& pegtx, co
         }
         CScript tweaked_fedpegscript = calculate_contract(scripts.second, claim_script);
         // TODO: Remove script/standard.h dep for GetScriptFor*
-        CScript expected_script(GetScriptForWitness(tweaked_fedpegscript));
+        CScript expected_script(GetScriptForDestination(WitnessV0ScriptHash(tweaked_fedpegscript)));
         if (scripts.first.IsPayToScriptHash()) {
             expected_script = GetScriptForDestination(ScriptHash(expected_script));
         }
@@ -240,7 +240,11 @@ bool CheckParentProofOfWork(uint256 hash, unsigned int nBits, const Consensus::P
     return true;
 }
 
-bool IsValidPeginWitness(const CScriptWitness& pegin_witness, const std::vector<std::pair<CScript, CScript>>& fedpegscripts, const COutPoint& prevout, std::string& err_msg, bool check_depth) {
+bool IsValidPeginWitness(const CScriptWitness& pegin_witness, const std::vector<std::pair<CScript, CScript>>& fedpegscripts, const COutPoint& prevout, std::string& err_msg, bool check_depth, bool* depth_failed) {
+    if (depth_failed) {
+        *depth_failed = false;
+    }
+
     // 0) Return false if !consensus.has_parent_chain
     if (!Params().GetConsensus().has_parent_chain) {
         err_msg = "Parent chain is not enabled on this network.";
@@ -372,19 +376,13 @@ bool IsValidPeginWitness(const CScriptWitness& pegin_witness, const std::vector<
         LogPrintf("Required depth: %d\n", required_depth);
         if (!IsConfirmedBitcoinBlock(block_hash, required_depth, num_txs)) {
             err_msg = "Needs more confirmations.";
+            if (depth_failed) {
+                *depth_failed = true;
+            }
             return false;
         }
     }
     return true;
-}
-
-// Constructs unblinded "bitcoin" output to be used in amount and scriptpubkey checks during pegin validation.
-CTxOut GetPeginOutputFromWitness(const CScriptWitness& pegin_witness) {
-    CDataStream stream(pegin_witness.stack[0], SER_NETWORK, PROTOCOL_VERSION);
-    CAmount value;
-    stream >> value;
-
-    return CTxOut(CAsset(pegin_witness.stack[1]), CConfidentialValue(value), CScript(pegin_witness.stack[3].begin(), pegin_witness.stack[3].end()));
 }
 
 bool MatchLiquidWatchman(const CScript& script)
@@ -465,7 +463,7 @@ std::vector<std::pair<CScript, CScript>> GetValidFedpegScripts(const CBlockIndex
 
     std::vector<std::pair<CScript, CScript>> fedpegscripts;
 
-    const int32_t epoch_length = params.dynamic_epoch_length;
+    const int32_t epoch_length = (int32_t) params.dynamic_epoch_length;
     const int32_t epoch_age = pblockindex->nHeight % epoch_length;
     const int32_t epoch_start_height = pblockindex->nHeight - epoch_age;
 
@@ -477,7 +475,11 @@ std::vector<std::pair<CScript, CScript>> GetValidFedpegScripts(const CBlockIndex
     }
 
     // Next we walk backwards up to M epoch starts
-    for (size_t i = 0; i < params.total_valid_epochs; i++) {
+    for (int32_t i = 0; i < (int32_t) params.total_valid_epochs; i++) {
+        // We are within total_valid_epochs of the genesis
+        if (i * epoch_length > epoch_start_height) {
+            break;
+        }
 
         const CBlockIndex* p_epoch_start = pblockindex->GetAncestor(epoch_start_height-i*epoch_length);
 
@@ -537,4 +539,47 @@ CScriptWitness CreatePeginWitness(const CAmount& value, const CAsset& asset, con
 CScriptWitness CreatePeginWitness(const CAmount& value, const CAsset& asset, const uint256& genesis_hash, const CScript& claim_script, const Sidechain::Bitcoin::CTransactionRef& tx_ref, const Sidechain::Bitcoin::CMerkleBlock& merkle_block)
 {
     return CreatePeginWitnessInner(value, asset, genesis_hash, claim_script, tx_ref, merkle_block);
+}
+
+bool DecomposePeginWitness(const CScriptWitness& witness, CAmount& value, CAsset& asset, uint256& genesis_hash, CScript& claim_script, boost::variant<boost::blank, Sidechain::Bitcoin::CTransactionRef, CTransactionRef>& tx, boost::variant<boost::blank, Sidechain::Bitcoin::CMerkleBlock, CMerkleBlock>& merkle_block)
+{
+    const auto& stack = witness.stack;
+
+    if (stack.size() < 5) return false;
+
+    CDataStream stream(stack[0], SER_NETWORK, PROTOCOL_VERSION);
+    stream >> value;
+
+    CAsset tmp_asset(stack[1]);
+    asset = tmp_asset;
+
+    uint256 gh(stack[2]);
+    genesis_hash = gh;
+
+    CScript s(stack[3].begin(), stack[3].end());
+    claim_script = s;
+
+    CDataStream ss_tx(stack[4], SER_NETWORK, PROTOCOL_VERSION);
+    if (Params().GetConsensus().ParentChainHasPow()) {
+        Sidechain::Bitcoin::CTransactionRef btc_tx;
+        ss_tx >> btc_tx;
+        tx = btc_tx;
+    } else {
+        CTransactionRef elem_tx;
+        ss_tx >> elem_tx;
+        tx = elem_tx;
+    }
+
+    CDataStream ss_proof(stack[5], SER_NETWORK, PROTOCOL_VERSION);
+    if (Params().GetConsensus().ParentChainHasPow()) {
+        Sidechain::Bitcoin::CMerkleBlock tx_proof;
+        ss_proof >> tx_proof;
+        merkle_block = tx_proof;
+    } else {
+        CMerkleBlock tx_proof;
+        ss_proof >> tx_proof;
+        merkle_block = tx_proof;
+    }
+
+    return true;
 }

@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2018 The Bitcoin Core developers
+// Copyright (c) 2009-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -47,6 +47,17 @@ static const unsigned int LOCKTIME_THRESHOLD = 500000000; // Tue Nov  5 00:53:20
 // checking is disabled (by setting all input sequence numbers to
 // SEQUENCE_FINAL).
 static const uint32_t LOCKTIME_MAX = 0xFFFFFFFFU;
+
+// Tag for input annex. If there are at least two witness elements for a transaction input,
+// and the first byte of the last element is 0x50, this last element is called annex, and
+// has meanings independent of the script
+static constexpr unsigned int ANNEX_TAG = 0x50;
+
+// Validation weight per passing signature (Tapscript only, see BIP 342).
+static constexpr uint64_t VALIDATION_WEIGHT_PER_SIGOP_PASSED = 50;
+
+// How much weight budget is added to the witness size (Tapscript only, see BIP 342).
+static constexpr uint64_t VALIDATION_WEIGHT_OFFSET = 50;
 
 // ELEMENTS:
 // Number of confirms on parent chain required to confirm on sidechain.
@@ -199,13 +210,66 @@ enum opcodetype
     OP_NOP9 = 0xb8,
     OP_NOP10 = 0xb9,
 
+    // Opcode added by BIP 342 (Tapscript)
+    OP_CHECKSIGADD = 0xba,
+
+    // Elements: Tapscript (Streaming sha2 opcodes)
+    OP_SHA256INITIALIZE = 0xc4,
+    OP_SHA256UPDATE = 0xc5,
+    OP_SHA256FINALIZE = 0xc6,
+
+    // Introspection opcodes
+    //inputs
+    OP_INSPECTINPUTOUTPOINT = 0xc7,
+    OP_INSPECTINPUTASSET = 0xc8,
+    OP_INSPECTINPUTVALUE = 0xc9,
+    OP_INSPECTINPUTSCRIPTPUBKEY = 0xca,
+    OP_INSPECTINPUTSEQUENCE = 0xcb,
+    OP_INSPECTINPUTISSUANCE = 0xcc,
+
+    // current index
+    OP_PUSHCURRENTINPUTINDEX = 0xcd,
+
+    // outputs
+    OP_INSPECTOUTPUTASSET = 0xce,
+    OP_INSPECTOUTPUTVALUE = 0xcf,
+    OP_INSPECTOUTPUTNONCE = 0xd0,
+    OP_INSPECTOUTPUTSCRIPTPUBKEY = 0xd1,
+
+    // transaction
+    OP_INSPECTVERSION = 0xd2,
+    OP_INSPECTLOCKTIME = 0xd3,
+    OP_INSPECTNUMINPUTS = 0xd4,
+    OP_INSPECTNUMOUTPUTS = 0xd5,
+    OP_TXWEIGHT = 0xd6,
+
+    // Arithmetic opcodes
+    OP_ADD64 = 0xd7,
+    OP_SUB64 = 0xd8,
+    OP_MUL64 = 0xd9,
+    OP_DIV64 = 0xda,
+    OP_NEG64 = 0xdb,
+    OP_LESSTHAN64 = 0xdc,
+    OP_LESSTHANOREQUAL64 = 0xdd,
+    OP_GREATERTHAN64 = 0xde,
+    OP_GREATERTHANOREQUAL64 = 0xdf,
+
+    // Conversion opcodes
+    OP_SCRIPTNUMTOLE64 = 0xe0,
+    OP_LE64TOSCRIPTNUM = 0xe1,
+    OP_LE32TOLE64 = 0xe2,
+
+    // Crypto opcodes
+    OP_ECMULSCALARVERIFY = 0xe3,
+    OP_TWEAKVERIFY = 0xe4,
+
     OP_INVALIDOPCODE = 0xff,
 };
 
 // Maximum value that an opcode can be
-static const unsigned int MAX_OPCODE = OP_SUBSTR_LAZY; // 0xc3
+static const unsigned int MAX_OPCODE = OP_TWEAKVERIFY; // 0xe4
 
-const char* GetOpName(opcodetype opcode);
+std::string GetOpName(opcodetype opcode);
 
 class scriptnum_error : public std::runtime_error
 {
@@ -341,7 +405,7 @@ public:
 
         std::vector<unsigned char> result;
         const bool neg = value < 0;
-        uint64_t absvalue = neg ? -value : value;
+        uint64_t absvalue = neg ? ~static_cast<uint64_t>(value) + 1 : static_cast<uint64_t>(value);
 
         while(absvalue)
         {
@@ -424,33 +488,17 @@ public:
     CScript(std::vector<unsigned char>::const_iterator pbegin, std::vector<unsigned char>::const_iterator pend) : CScriptBase(pbegin, pend) { }
     CScript(const unsigned char* pbegin, const unsigned char* pend) : CScriptBase(pbegin, pend) { }
 
-    ADD_SERIALIZE_METHODS;
+    SERIALIZE_METHODS(CScript, obj) { READWRITEAS(CScriptBase, obj); }
 
-    template <typename Stream, typename Operation>
-    inline void SerializationOp(Stream& s, Operation ser_action) {
-        READWRITEAS(CScriptBase, *this);
-    }
-
-    CScript& operator+=(const CScript& b)
-    {
-        reserve(size() + b.size());
-        insert(end(), b.begin(), b.end());
-        return *this;
-    }
-
-    friend CScript operator+(const CScript& a, const CScript& b)
-    {
-        CScript ret = a;
-        ret += b;
-        return ret;
-    }
-
-    CScript(int64_t b)        { operator<<(b); }
-
+    explicit CScript(int64_t b) { operator<<(b); }
     explicit CScript(opcodetype b)     { operator<<(b); }
     explicit CScript(const CScriptNum& b) { operator<<(b); }
-    explicit CScript(const std::vector<unsigned char>& b) { operator<<(b); }
+    // delete non-existent constructor to defend against future introduction
+    // e.g. via prevector
+    explicit CScript(const std::vector<unsigned char>& b) = delete;
 
+    /** Delete non-existent operator to defend against future introduction */
+    CScript& operator<<(const CScript& b) = delete;
 
     CScript& operator<<(int64_t b) { return push_int64(b); }
 
@@ -497,15 +545,6 @@ public:
         return *this;
     }
 
-    CScript& operator<<(const CScript& b)
-    {
-        // I'm not sure if this should push the script or concatenate scripts.
-        // If there's ever a use for pushing a script onto a script, delete this member fn
-        assert(!"Warning: Pushing a CScript onto a CScript with << is probably not intended, use + to concatenate!");
-        return *this;
-    }
-
-
     bool GetOp(const_iterator& pc, opcodetype& opcodeRet, std::vector<unsigned char>& vchRet) const
     {
         return GetScriptOp(pc, end(), opcodeRet, &vchRet);
@@ -515,7 +554,6 @@ public:
     {
         return GetScriptOp(pc, end(), opcodeRet, nullptr);
     }
-
 
     /** Encode/decode small integers: */
     static int DecodeOP_N(opcodetype opcode)
@@ -593,7 +631,7 @@ struct CScriptWitness
 {
     // Note that this encodes the data elements being pushed, rather than
     // encoding them as a CScript that pushes them.
-    std::vector<std::vector<unsigned char> > stack;
+    std::vector<std::vector<unsigned char> > stack{};
 
     // Some compilers complain without a default constructor
     CScriptWitness() { }
@@ -607,13 +645,7 @@ struct CScriptWitness
     uint32_t GetSerializedSize() const;
 };
 
-class CReserveScript
-{
-public:
-    CScript reserveScript;
-    virtual void KeepScript() {}
-    CReserveScript() {}
-    virtual ~CReserveScript() {}
-};
+/** Test for OP_SUCCESSx opcodes as defined by BIP342. */
+bool IsOpSuccess(const opcodetype& opcode);
 
 #endif // BITCOIN_SCRIPT_SCRIPT_H

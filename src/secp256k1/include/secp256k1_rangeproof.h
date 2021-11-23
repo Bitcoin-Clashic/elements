@@ -55,9 +55,6 @@ SECP256K1_API int secp256k1_pedersen_commitment_serialize(
     const secp256k1_pedersen_commitment* commit
 ) SECP256K1_ARG_NONNULL(1) SECP256K1_ARG_NONNULL(2) SECP256K1_ARG_NONNULL(3);
 
-/** Initialize a context for usage with Pedersen commitments. */
-void secp256k1_pedersen_context_initialize(secp256k1_context* ctx);
-
 /** Generate a pedersen commitment.
  *  Returns 1: Commitment successfully created.
  *          0: Error. The blinding factor is larger than the group order
@@ -161,9 +158,6 @@ SECP256K1_API SECP256K1_WARN_UNUSED_RESULT int secp256k1_pedersen_blind_generato
   size_t n_inputs
 );
 
-/** Initialize a context for usage with Pedersen commitments. */
-void secp256k1_rangeproof_context_initialize(secp256k1_context* ctx);
-
 /** Verify a proof that a committed value is within a range.
  * Returns 1: Value is within the range [0..2^64), the specifically proven range is in the min/max value outputs.
  *         0: Proof failed or other error.
@@ -203,7 +197,9 @@ SECP256K1_API SECP256K1_WARN_UNUSED_RESULT int secp256k1_rangeproof_verify(
  *  In/Out: blind_out: storage for the 32-byte blinding factor used for the commitment
  *        value_out: pointer to an unsigned int64 which has the exact value of the commitment.
  *        message_out: pointer to a 4096 byte character array to receive message data from the proof author.
- *        outlen:  length of message data written to message_out.
+ *        outlen: length of message data written to message_out. This is generally not equal to the
+ *                msg_len used by the signer. However, for all i with msg_len <= i < outlen, it is
+ *                guaranteed that message_out[i] == 0.
  *        min_value: pointer to an unsigned int64 which will be updated with the minimum value that commit could have. (cannot be NULL)
  *        max_value: pointer to an unsigned int64 which will be updated with the maximum value that commit could have. (cannot be NULL)
  */

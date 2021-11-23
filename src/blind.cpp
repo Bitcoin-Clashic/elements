@@ -11,7 +11,7 @@
 #include <random.h>
 #include <util/system.h>
 
-static secp256k1_context* secp256k1_blind_context = NULL;
+secp256k1_context* secp256k1_blind_context = NULL;
 
 class Blind_ECC_Init {
 public:
@@ -192,13 +192,22 @@ bool SurjectOutput(CTxOutWitness& txoutwit, const std::vector<secp256k1_fixed_as
 {
     int ret;
     // 1 to 3 targets
-    size_t nInputsToSelect = std::min((size_t)3, surjection_targets.size());
+    size_t nInputsToSelect = std::min(MAX_SURJECTION_TARGETS, surjection_targets.size());
     unsigned char randseed[32];
     GetStrongRandBytes(randseed, 32);
     size_t input_index;
     secp256k1_surjectionproof proof;
     secp256k1_fixed_asset_tag tag;
     memcpy(&tag, asset.begin(), 32);
+    // FIXME [hardfork] Elements currently cannot handle surjection proofs on transactions
+    //  with more than 256 inputs. The Elements verification code will always try to give
+    //  secp-zkp the complete list of inputs, and if this exceeds 256 then surjectionproof_verify
+    //  will always return false, so there is no way to work around this situation at signing time
+    if (surjection_targets.size() > SECP256K1_SURJECTIONPROOF_MAX_N_INPUTS) {
+        // We must return false here to avoid triggering an assertation within
+        // secp256k1_surjectionproof_initialize on the next line.
+        return false;
+    }
     // Find correlation between asset tag and listed input tags
     if (secp256k1_surjectionproof_initialize(secp256k1_blind_context, &proof, &input_index, &surjection_targets[0], surjection_targets.size(), nInputsToSelect, &tag, 100, randseed) == 0) {
         return false;

@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2018 The Bitcoin Core developers
+// Copyright (c) 2016-2019 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -104,7 +104,6 @@ ThresholdState AbstractThresholdConditionChecker::GetStateFor(const CBlockIndex*
     return state;
 }
 
-// return the numerical statistics of blocks signalling the specified BIP9 condition in this current period
 BIP9Stats AbstractThresholdConditionChecker::GetStateStatisticsFor(const CBlockIndex* pindex, const Consensus::Params& params) const
 {
     BIP9Stats stats = {};
@@ -181,8 +180,20 @@ private:
 protected:
     int64_t BeginTime(const Consensus::Params& params) const override { return params.vDeployments[id].nStartTime; }
     int64_t EndTime(const Consensus::Params& params) const override { return params.vDeployments[id].nTimeout; }
-    int Period(const Consensus::Params& params) const override { return params.nMinerConfirmationWindow; }
-    int Threshold(const Consensus::Params& params) const override { return params.nRuleChangeActivationThreshold; }
+    int Period(const Consensus::Params& params) const override {
+        if (params.vDeployments[id].nPeriod) {
+            return *params.vDeployments[id].nPeriod;
+        } else {
+            return params.nMinerConfirmationWindow;
+        }
+    }
+    int Threshold(const Consensus::Params& params) const override {
+        if (params.vDeployments[id].nThreshold) {
+            return *params.vDeployments[id].nThreshold;
+        } else {
+            return params.nRuleChangeActivationThreshold;
+        }
+    }
 
     bool Condition(const CBlockIndex* pindex, const Consensus::Params& params) const override
     {

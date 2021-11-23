@@ -1,14 +1,15 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2018 The Bitcoin Core developers
+// Copyright (c) 2009-2019 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <script/script.h>
 
-#include <tinyformat.h>
 #include <util/strencodings.h>
 
-const char* GetOpName(opcodetype opcode)
+#include <string>
+
+std::string GetOpName(opcodetype opcode)
 {
     switch (opcode)
     {
@@ -142,6 +143,48 @@ const char* GetOpName(opcodetype opcode)
     case OP_NOP8                   : return "OP_NOP8";
     case OP_NOP9                   : return "OP_NOP9";
     case OP_NOP10                  : return "OP_NOP10";
+
+    // Opcode added by BIP 342 (Tapscript)
+    case OP_CHECKSIGADD            : return "OP_CHECKSIGADD";
+
+    // Elements Tapscript opcodes
+    case OP_SHA256INITIALIZE       : return "OP_SHA256INITIALIZE";
+    case OP_SHA256UPDATE           : return "OP_SHA256UPDATE";
+    case OP_SHA256FINALIZE         : return "OP_SHA256FINALIZE";
+    case OP_INSPECTINPUTOUTPOINT   : return "OP_INSPECTINPUTOUTPOINT";
+    case OP_INSPECTINPUTASSET      : return "OP_INSPECTINPUTASSET";
+    case OP_INSPECTINPUTVALUE      : return "OP_INSPECTINPUTVALUE";
+    case OP_INSPECTINPUTSCRIPTPUBKEY : return "OP_INSPECTINPUTSCRIPTPUBKEY";
+    case OP_INSPECTINPUTSEQUENCE   : return "OP_INSPECTINPUTSEQUENCE";
+    case OP_INSPECTINPUTISSUANCE   : return "OP_INSPECTINPUTISSUANCE";
+    case OP_PUSHCURRENTINPUTINDEX  : return "OP_PUSHCURRENTINPUTINDEX";
+    case OP_INSPECTOUTPUTASSET     : return "OP_INSPECTOUTPUTASSET";
+    case OP_INSPECTOUTPUTVALUE     : return "OP_INSPECTOUTPUTVALUE";
+    case OP_INSPECTOUTPUTNONCE     : return "OP_INSPECTOUTPUTNONCE";
+    case OP_INSPECTOUTPUTSCRIPTPUBKEY : return "OP_INSPECTOUTPUTSCRIPTPUBKEY";
+    case OP_INSPECTVERSION         : return "OP_INSPECTVERSION";
+    case OP_INSPECTLOCKTIME        : return "OP_INSPECTLOCKTIME";
+    case OP_INSPECTNUMINPUTS       : return "OP_INSPECTNUMINPUTS";
+    case OP_INSPECTNUMOUTPUTS      : return "OP_INSPECTNUMOUTPUTS";
+    case OP_TXWEIGHT               : return "OP_TXWEIGHT";
+
+    // 64 bit LE arithmetic opcodes
+    case OP_ADD64                  : return "OP_ADD64";
+    case OP_SUB64                  : return "OP_SUB64";
+    case OP_MUL64                  : return "OP_MUL64";
+    case OP_DIV64                  : return "OP_DIV64";
+    case OP_NEG64                  : return "OP_NEG64";
+    case OP_LESSTHAN64             : return "OP_LESSTHAN64";
+    case OP_LESSTHANOREQUAL64      : return "OP_LESSTHANOREQUAL64";
+    case OP_GREATERTHAN64          : return "OP_GREATERTHAN64";
+    case OP_GREATERTHANOREQUAL64   : return "OP_GREATERTHANOREQUAL64";
+    case OP_SCRIPTNUMTOLE64        : return "OP_SCRIPTNUMTOLE64";
+    case OP_LE64TOSCRIPTNUM        : return "OP_LE64TOSCRIPTNUM";
+    case OP_LE32TOLE64             : return "OP_LE32TOLE64";
+
+    // Crypto opcodes
+    case OP_ECMULSCALARVERIFY      : return "OP_ECMULSCALARVERIFY";
+    case OP_TWEAKVERIFY            : return "OP_TWEAKVERIFY";
 
     case OP_INVALIDOPCODE          : return "OP_INVALIDOPCODE";
 
@@ -403,4 +446,15 @@ bool GetScriptOp(CScriptBase::const_iterator& pc, CScriptBase::const_iterator en
 
     opcodeRet = static_cast<opcodetype>(opcode);
     return true;
+}
+
+bool IsOpSuccess(const opcodetype& opcode)
+{
+    // ELEMENTS: Don't mark opcodes (OP_CAT, OP_SUBSTR, OP_LEFT, OP_RIGHT) as OP_SUCCESS
+    return opcode == 80 || opcode == 98 || (opcode >= 137 && opcode <= 138) ||
+            // ELEMENTS: Don't mark OP_INVERT , OP_AND, OP_OR, OP_XOR. OP_LSHIFT, OP_RSHIFT as success
+           (opcode >= 141 && opcode <= 142) || (opcode >= 149 && opcode <= 151) ||
+           // ELEMENTS: Exclude OP_DETERMINISTICRANDOM(192), OP_CHECKSIGFROMSTACK(VERIFY)(192-193), OP_SUBSTRLAZY(195)
+           // ELEMENTS: Tapscript extension from OP_SHA256INITIALIZE(196) till OP_TWEAKVERIFY(228)
+           (opcode >= 187 && opcode <= 191) || (opcode >= 229 && opcode <= 254);
 }

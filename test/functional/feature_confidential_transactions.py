@@ -16,12 +16,11 @@ from test_framework.messages import (
     CTxOutValue,
     CTxInWitness,
     CTxOutWitness,
+    FromHex,
 )
 from test_framework.util import (
-    connect_nodes_bi,
     assert_equal,
     hex_str_to_bytes,
-    bytes_to_hex_str,
     BITCOIN_ASSET_OUT,
     assert_raises_rpc_error,
 )
@@ -44,9 +43,9 @@ class CTTest (BitcoinTestFramework):
 
     def setup_network(self, split=False):
         self.setup_nodes()
-        connect_nodes_bi(self.nodes, 0, 1)
-        connect_nodes_bi(self.nodes, 1, 2)
-        connect_nodes_bi(self.nodes, 0, 2)
+        self.connect_nodes(0, 1)
+        self.connect_nodes(1, 2)
+        self.connect_nodes(0, 2)
         self.sync_all()
 
     def skip_test_if_missing_module(self):
@@ -84,7 +83,7 @@ class CTTest (BitcoinTestFramework):
         self.nodes[0].createwallet("recover")
         rec = self.nodes[0].get_wallet_rpc("recover")
         wrong_info = rec.getaddressinfo(blind_addr)
-        assert("pubkey" not in wrong_info)
+        assert "pubkey" not in wrong_info
         assert_equal(wrong_info["ismine"], False)
 
         # Setting seed should get us more info, still not "ours" until blinding key
@@ -92,19 +91,74 @@ class CTTest (BitcoinTestFramework):
         rec.sethdseed(True, found_seed)
 
         wrong_blind_info = rec.getaddressinfo(blind_addr)
-        assert("pubkey" in wrong_blind_info)
+        assert "pubkey" in wrong_blind_info
         assert_equal(wrong_blind_info["ismine"], False)
 
         # Now import master blinding key
         rec.importmasterblindingkey(found_blind)
         assert_equal(rec.dumpmasterblindingkey(), found_blind)
         blind_info = rec.getaddressinfo(blind_addr)
-        assert("pubkey" in blind_info)
+        assert "pubkey" in blind_info
         assert_equal(blind_info["ismine"], True)
         assert_equal(rec.getaddressinfo(blind_info["unconfidential"])["confidential"], blind_addr)
         self.nodes[0].unloadwallet("recover")
 
+    def test_null_rangeproof_enforcement(self):
+        self.nodes[0].generate(1)
+
+        # 1. Produce a transaction. This is coming out of initialfreecoins so
+        #    no signatures are needed, which slightly simplifies the test
+        unfunded_tx = self.nodes[0].createrawtransaction([], [{self.nodes[1].getnewaddress(): 1000}])
+        unblinded_tx = self.nodes[0].fundrawtransaction(unfunded_tx)['hex']
+        unsigned_tx = self.nodes[0].blindrawtransaction(unblinded_tx)
+        assert_equal(self.nodes[0].testmempoolaccept([unsigned_tx])[0]['allowed'], True) # tx is ok before we malleate it
+        tx = FromHex(CTransaction(), unsigned_tx)
+        assert tx.wit.vtxinwit[0].vchIssuanceAmountRangeproof == b''
+        assert tx.wit.vtxinwit[0].vchInflationKeysRangeproof == b''
+
+        # 1a. Add an issuance with null amounts but rangeproofs
+        tx.wit.vtxinwit = [CTxInWitness()]
+        tx.wit.vtxinwit[0].vchIssuanceAmountRangeproof = b'this should not be allowed'
+        hex_tx = tx.serialize(with_witness=True).hex()
+        assert_equal(self.nodes[0].testmempoolaccept([hex_tx])[0]['allowed'], False)
+
+        tx.wit.vtxinwit[0].vchIssuanceAmountRangeproof = b''
+        tx.wit.vtxinwit[0].vchInflationKeysRangeproof = b'and neither should this'
+        hex_tx = tx.serialize(with_witness=True).hex()
+        assert_equal(self.nodes[0].testmempoolaccept([hex_tx])[0]['allowed'], False)
+
+        # 2. Create an issuance tx with no tokens
+        issuance_tx = self.nodes[0].rawissueasset(unblinded_tx, [{"asset_amount": 2, "asset_address": self.nodes[1].getnewaddress()}])[0]['hex']
+        issuance_tx = self.nodes[0].blindrawtransaction(issuance_tx)
+        assert_equal(self.nodes[0].testmempoolaccept([issuance_tx])[0]['allowed'], True) # tx is ok before we malleate it
+        tx = FromHex(CTransaction(), issuance_tx)
+        assert tx.wit.vtxinwit[0].vchIssuanceAmountRangeproof != b''
+        assert tx.wit.vtxinwit[0].vchInflationKeysRangeproof == b''
+        # 2a. Attach a rangeproof to the (null) reissuance token amount
+        tx.wit.vtxinwit[0].vchInflationKeysRangeproof = b'and this also should not be allowed'
+        hex_tx = tx.serialize(with_witness=True).hex()
+        assert_equal(self.nodes[0].testmempoolaccept([hex_tx])[0]['allowed'], False)
+
+        # 3. Create an issuance tx with tokens but no issuance. This time we do an
+        #    explicit issuance because we want to null out the issuance amount, and
+        #    `rawissueasset` would want to put a confidential 0 rather than a null.
+        blinded_addr = self.nodes[1].getnewaddress()
+        unblinded_addr = self.nodes[1].validateaddress(blinded_addr)['unconfidential']
+        issuance_tx = self.nodes[0].rawissueasset(unblinded_tx, [{"token_amount": 2, "token_address": unblinded_addr, "blind": False }])[0]['hex']
+        issuance_tx = self.nodes[0].blindrawtransaction(issuance_tx, False, [], False)
+        assert_equal(self.nodes[0].testmempoolaccept([issuance_tx])[0]['allowed'], True) # tx is ok before we malleate it
+        tx = FromHex(CTransaction(), issuance_tx)
+        assert tx.wit.vtxinwit[0].vchIssuanceAmountRangeproof == b''
+        assert tx.wit.vtxinwit[0].vchInflationKeysRangeproof == b''
+        # 3a. Attach a rangeproof to the (null) issuance amount
+        tx.wit.vtxinwit[0].vchIssuanceAmountRangeproof = b'this also should not be allowed'
+        hex_tx = tx.serialize(with_witness=True).hex()
+        assert_equal(self.nodes[0].testmempoolaccept([hex_tx])[0]['allowed'], False)
+
     def run_test(self):
+
+        print("Testing that null issuances must have null rangeproofs")
+        self.test_null_rangeproof_enforcement()
 
         print("Testing wallet secret recovery")
         self.test_wallet_recovery()
@@ -136,8 +190,8 @@ class CTTest (BitcoinTestFramework):
         self.nodes[0].generate(101)
         self.sync_all()
         assert_equal(self.nodes[0].getbalance()["bitcoin"], node0)
-        assert_equal(self.nodes[1].getbalance("*", 1, False, "bitcoin"), node1)
-        assert_equal(self.nodes[2].getbalance("*", 1, False, "bitcoin"), node2)
+        assert_equal(self.nodes[1].getbalance("*", 1, False, False, "bitcoin"), node1)
+        assert_equal(self.nodes[2].getbalance("*", 1, False, False, "bitcoin"), node2)
 
         # Send 3 BTC from 0 to a new unconfidential address of 2 with
         # the sendtoaddress call
@@ -152,7 +206,7 @@ class CTTest (BitcoinTestFramework):
         node2 = node2 + value0
 
         assert_equal(self.nodes[0].getbalance()["bitcoin"], node0)
-        assert_equal(self.nodes[1].getbalance("*", 1, False, "bitcoin"), node1)
+        assert_equal(self.nodes[1].getbalance("*", 1, False, False, "bitcoin"), node1)
         assert_equal(self.nodes[2].getbalance()["bitcoin"], node2)
 
         # Send 5 BTC from 0 to a new address of 2 with the sendtoaddress call
@@ -167,7 +221,7 @@ class CTTest (BitcoinTestFramework):
         node2 = node2 + value1
 
         assert_equal(self.nodes[0].getbalance()["bitcoin"], node0)
-        assert_equal(self.nodes[1].getbalance("*", 1, False, "bitcoin"), node1)
+        assert_equal(self.nodes[1].getbalance("*", 1, False, False, "bitcoin"), node1)
         assert_equal(self.nodes[2].getbalance()["bitcoin"], node2)
 
         # Send 7 BTC from 0 to the unconfidential address of 2 and 11 BTC to the
@@ -183,8 +237,8 @@ class CTTest (BitcoinTestFramework):
         tx = self.nodes[0].createrawtransaction([{"txid": unspent[0]["txid"],
                                                   "vout": unspent[0]["vout"],
                                                   "nValue": unspent[0]["amount"]}],
-                                                {unconfidential_address: value2, address2: value3,
-                                                change_address: unspent[0]["amount"] - value2 - value3 - fee, "fee":fee})
+                                                [{unconfidential_address: value2}, {address2: value3},
+                                                {change_address: unspent[0]["amount"] - value2 - value3 - fee}, {"fee":fee}])
         tx = self.nodes[0].blindrawtransaction(tx)
         tx_signed = self.nodes[0].signrawtransactionwithwallet(tx)
         raw_tx_id = self.nodes[0].sendrawtransaction(tx_signed['hex'])
@@ -195,7 +249,7 @@ class CTTest (BitcoinTestFramework):
         node2 += value2 + value3
 
         assert_equal(self.nodes[0].getbalance()["bitcoin"], node0)
-        assert_equal(self.nodes[1].getbalance("*", 1, False, "bitcoin"), node1)
+        assert_equal(self.nodes[1].getbalance("*", 1, False, False, "bitcoin"), node1)
         assert_equal(self.nodes[2].getbalance()["bitcoin"], node2)
 
         # Check 2's listreceivedbyaddress
@@ -230,10 +284,10 @@ class CTTest (BitcoinTestFramework):
             if "value" in output and output["scriptPubKey"]["type"] != "fee":
                 assert_equal(output["scriptPubKey"]["addresses"][0], self.nodes[1].validateaddress(address2)['unconfidential'])
                 found_unblinded = True
-        assert(found_unblinded)
+        assert found_unblinded
 
         assert_equal(self.nodes[1].gettransaction(raw_tx_id, True)['amount']["bitcoin"], value3)
-        assert_equal(self.nodes[1].gettransaction(raw_tx_id, True, "bitcoin")['amount'], value3)
+        assert_equal(self.nodes[1].gettransaction(raw_tx_id, True, False, "bitcoin")['amount'], value3)
         list_unspent = self.nodes[1].listunspent(1, 9999999, [], True, {"asset": "bitcoin"})
         assert_equal(list_unspent[0]['amount']+list_unspent[1]['amount'], value1+value3)
         received_by_address = self.nodes[1].listreceivedbyaddress(1, False, True)
@@ -250,7 +304,7 @@ class CTTest (BitcoinTestFramework):
         tx = self.nodes[0].createrawtransaction([{"txid": unspent[0]["txid"],
                                                   "vout": unspent[0]["vout"],
                                                   "nValue": unspent[0]["amount"]}],
-                                                  {unconfidential_address: unspent[0]["amount"] - fee, "fee":fee})
+                                                  [{unconfidential_address: unspent[0]["amount"] - fee}, {"fee":fee}])
 
         # Test that blindrawtransaction adds an OP_RETURN output to balance blinders
         temptx = self.nodes[0].blindrawtransaction(tx)
@@ -265,8 +319,8 @@ class CTTest (BitcoinTestFramework):
         tx = self.nodes[0].createrawtransaction([{"txid": unspent[0]["txid"],
                                                   "vout": unspent[0]["vout"],
                                                   "nValue": unspent[0]["amount"]}],
-                                                  {unconfidential_address: value4,
-                                                   change_address: unspent[0]["amount"] - value4 - fee, "fee":fee})
+                                                  [{unconfidential_address: value4},
+                                                   {change_address: unspent[0]["amount"] - value4 - fee}, {"fee":fee}])
         tx = self.nodes[0].blindrawtransaction(tx)
         tx_signed = self.nodes[0].signrawtransactionwithwallet(tx)
         txid = self.nodes[0].sendrawtransaction(tx_signed['hex'])
@@ -286,7 +340,7 @@ class CTTest (BitcoinTestFramework):
         node0 -= value4
         node2 += value4
         assert_equal(self.nodes[0].getbalance()["bitcoin"], node0)
-        assert_equal(self.nodes[1].getbalance("*", 1, False, "bitcoin"), node1)
+        assert_equal(self.nodes[1].getbalance("*", 1, False, False, "bitcoin"), node1)
         assert_equal(self.nodes[2].getbalance()["bitcoin"], node2)
 
         # Testing wallet's ability to deblind its own outputs
@@ -294,7 +348,7 @@ class CTTest (BitcoinTestFramework):
         addr2 = self.nodes[0].getnewaddress()
         # We add two to-blind outputs, fundraw adds an already-blinded change output
         # If we only add one, the newly blinded will be 0-blinded because input = -output
-        raw = self.nodes[0].createrawtransaction([], {addr:Decimal('1.1'), addr2:1})
+        raw = self.nodes[0].createrawtransaction([], [{addr:Decimal('1.1')}, {addr2:1}])
         funded = self.nodes[0].fundrawtransaction(raw)
         # fund again to make sure no blinded outputs were created (would fail)
         funded = self.nodes[0].fundrawtransaction(funded["hex"])
@@ -371,13 +425,13 @@ class CTTest (BitcoinTestFramework):
         issued2 = self.nodes[0].issueasset(2, 1)
         test_asset = issued2["asset"]
         assert_equal(self.nodes[0].getwalletinfo()['balance'][test_asset], Decimal(2))
-        assert(test_asset not in self.nodes[1].getwalletinfo()['balance'])
+        assert test_asset not in self.nodes[1].getwalletinfo()['balance']
 
         # Assets balance checking, note that accounts are completely ignored because
         # balance queries with accounts are horrifically broken upstream
-        assert_equal(self.nodes[0].getbalance("*", 0, False, "bitcoin"), self.nodes[0].getbalance("*", 0, False, "bitcoin"))
-        assert_equal(self.nodes[0].getbalance("*", 0, False)['bitcoin'], self.nodes[0].getbalance("*", 0, False, "bitcoin"))
-        assert_equal(self.nodes[0].getwalletinfo()['balance']['bitcoin'], self.nodes[0].getbalance("*", 0, False, "bitcoin"))
+        assert_equal(self.nodes[0].getbalance("*", 0, False, False, "bitcoin"), self.nodes[0].getbalance("*", 0, False, False, "bitcoin"))
+        assert_equal(self.nodes[0].getbalance("*", 0, False, False)["bitcoin"], self.nodes[0].getbalance("*", 0, False, False, "bitcoin"))
+        assert_equal(self.nodes[0].getwalletinfo()['balance']['bitcoin'], self.nodes[0].getbalance("*", 0, False, False, "bitcoin"))
 
         # Send some bitcoin and other assets over as well to fund wallet
         addr = self.nodes[2].getnewaddress()
@@ -389,7 +443,7 @@ class CTTest (BitcoinTestFramework):
         self.sync_all()
 
         # Should have exactly 1 in change(trusted, though not confirmed) after sending one off
-        assert_equal(self.nodes[0].getbalance("*", 0, False, test_asset), 1)
+        assert_equal(self.nodes[0].getbalance("*", 0, False, False, test_asset), 1)
         assert_equal(self.nodes[2].getunconfirmedbalance()[test_asset], Decimal(1))
 
         b_utxos = self.nodes[2].listunspent(0, 0, [], True, {"asset": "bitcoin"})
@@ -401,7 +455,19 @@ class CTTest (BitcoinTestFramework):
         rawaddrs = []
         for i in range(2):
             rawaddrs.append(self.nodes[1].getnewaddress())
-        raw_assets = self.nodes[2].createrawtransaction([{"txid":b_utxos[0]['txid'], "vout":b_utxos[0]['vout'], "nValue":b_utxos[0]['amount']}, {"txid":b_utxos[1]['txid'], "vout":b_utxos[1]['vout'], "nValue":b_utxos[1]['amount'], "asset":b_utxos[1]['asset']}, {"txid":t_utxos[0]['txid'], "vout":t_utxos[0]['vout'], "nValue":t_utxos[0]['amount'], "asset":t_utxos[0]['asset']}], {rawaddrs[1]:Decimal(t_utxos[0]['amount']), rawaddrs[0]:Decimal(b_utxos[0]['amount']+b_utxos[1]['amount']-Decimal("0.01")), "fee":Decimal("0.01")}, 0, False, {rawaddrs[0]:b_utxos[0]['asset'], rawaddrs[1]:t_utxos[0]['asset'], "fee":b_utxos[0]['asset']})
+        raw_assets = self.nodes[2].createrawtransaction(
+                [
+                    {"txid":b_utxos[0]['txid'], "vout":b_utxos[0]['vout'], "nValue":b_utxos[0]['amount']},
+                    {"txid":b_utxos[1]['txid'], "vout":b_utxos[1]['vout'], "nValue":b_utxos[1]['amount'], "asset":b_utxos[1]['asset']},
+                    {"txid":t_utxos[0]['txid'], "vout":t_utxos[0]['vout'], "nValue":t_utxos[0]['amount'], "asset":t_utxos[0]['asset']}
+                ],
+                [
+                    {rawaddrs[1]:Decimal(t_utxos[0]['amount']), "asset": t_utxos[0]["asset"]},
+                    {rawaddrs[0]:Decimal(b_utxos[0]['amount']+b_utxos[1]['amount']-Decimal("0.01")), "asset": b_utxos[0]["asset"]},
+                    {"fee":Decimal("0.01"), "asset": b_utxos[0]["asset"]}
+                ],
+                0,
+                False)
 
         # Sign unblinded, then blinded
         signed_assets = self.nodes[2].signrawtransactionwithwallet(raw_assets)
@@ -416,7 +482,7 @@ class CTTest (BitcoinTestFramework):
         issuancedata = self.nodes[2].issueasset(0, Decimal('0.00000006')) #0 of asset, 6 reissuance token
 
         # Node 2 will send node 1 a reissuance token, both will generate assets
-        self.nodes[2].sendtoaddress(self.nodes[1].getnewaddress(), Decimal('0.00000001'), "", "", False, False, 1, "UNSET", issuancedata["token"])
+        self.nodes[2].sendtoaddress(self.nodes[1].getnewaddress(), Decimal('0.00000001'), "", "", False, False, 1, "UNSET", False, issuancedata["token"])
         # node 1 needs to know about a (re)issuance to reissue itself
         self.nodes[1].importaddress(self.nodes[2].gettransaction(issuancedata["txid"])["details"][0]["address"])
         # also send some bitcoin
@@ -434,14 +500,14 @@ class CTTest (BitcoinTestFramework):
         self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), self.nodes[0].getwalletinfo()["balance"]["bitcoin"], "", "", True)
         issued = self.nodes[0].issueasset(0, 1, False)
         walletinfo = self.nodes[0].getwalletinfo()
-        assert(issued["asset"] not in walletinfo["balance"])
+        assert issued["asset"] not in walletinfo["balance"]
         assert_equal(walletinfo["balance"][issued["token"]], Decimal(1))
-        assert(issued["asset"] not in walletinfo["unconfirmed_balance"])
-        assert(issued["token"] not in walletinfo["unconfirmed_balance"])
+        assert issued["asset"] not in walletinfo["unconfirmed_balance"]
+        assert issued["token"] not in walletinfo["unconfirmed_balance"]
 
         # Check for value when receiving different assets by same address.
-        self.nodes[0].sendtoaddress(unconfidential_address2, Decimal('0.00000001'), "", "", False, False, 1, "UNSET", test_asset)
-        self.nodes[0].sendtoaddress(unconfidential_address2, Decimal('0.00000002'), "", "", False, False, 1, "UNSET", test_asset)
+        self.nodes[0].sendtoaddress(unconfidential_address2, Decimal('0.00000001'), "", "", False, False, 1, "UNSET", False, test_asset)
+        self.nodes[0].sendtoaddress(unconfidential_address2, Decimal('0.00000002'), "", "", False, False, 1, "UNSET", False, test_asset)
         self.nodes[0].generate(1)
         self.sync_all()
         received_by_address = self.nodes[1].listreceivedbyaddress(0, False, True)
@@ -475,7 +541,7 @@ class CTTest (BitcoinTestFramework):
         self.nodes[2].generate(1)
         self.sync_all()
         node2_balance = self.nodes[2].getbalance()
-        assert(issued3['asset'] in node2_balance)
+        assert issued3['asset'] in node2_balance
         assert_equal(node2_balance[issued3['asset']], Decimal(1))
 
         # Send asset to blinded multisig address and check that it was received
@@ -486,7 +552,7 @@ class CTTest (BitcoinTestFramework):
         # after the transaction is signed by node1 and node0 in succession.
         unspent_asset = self.nodes[0].listunspent(0, 0, [unconfidential_addr], True, {"asset":issued3['asset']})
         assert_equal(len(unspent_asset), 1)
-        assert(issued3['asset'] not in self.nodes[2].getbalance())
+        assert issued3['asset'] not in self.nodes[2].getbalance()
 
         # Create new UTXO on node0 to be used in our partially-blinded transaction
         blinded_addr = self.nodes[0].getnewaddress()
@@ -512,15 +578,14 @@ class CTTest (BitcoinTestFramework):
 
         # Create one part of the transaction to partially blind
         rawtx = self.nodes[0].createrawtransaction(
-            inputs[:1], {dst_addr2: Decimal("0.01")})
+            inputs[:1], [{dst_addr2: Decimal("0.01")}])
 
         # Create another part of the transaction to partially blind
         rawtx2 = self.nodes[0].createrawtransaction(
             inputs[1:],
-            {dst_addr: Decimal("0.1"), dst_addr3: Decimal("1.0")},
+            [{dst_addr: Decimal("0.1"), "asset": unspent[0]["asset"]}, {dst_addr3: Decimal("1.0"), "asset": unspent_asset[0]["asset"]}],
             0,
-            False,
-            {dst_addr: unspent[0]['asset'], dst_addr3: unspent_asset[0]['asset']})
+            False)
 
         sum_i = unspent2[0]["amount"] + unspent[0]["amount"]
         sum_o = 0.01 + 0.10 + 0.1
@@ -573,7 +638,7 @@ class CTTest (BitcoinTestFramework):
 
         # Blind with wrong order of assetcommitments - such transaction should be rejected
         blindtx = self.nodes[0].blindrawtransaction(
-            bytes_to_hex_str(btx.serialize()), True, [
+            btx.serialize().hex(), True, [
                 unspent_asset[0]['assetcommitment'],
                 unspent[0]['assetcommitment'],
                 unspent2[0]['assetcommitment']
@@ -587,7 +652,7 @@ class CTTest (BitcoinTestFramework):
 
         # Blind with correct order of assetcommitments
         blindtx = self.nodes[0].blindrawtransaction(
-            bytes_to_hex_str(btx.serialize()), True, [
+            btx.serialize().hex(), True, [
                 unspent2[0]['assetcommitment'],
                 unspent[0]['assetcommitment'],
                 unspent_asset[0]['assetcommitment']
@@ -614,7 +679,15 @@ class CTTest (BitcoinTestFramework):
         self.nodes[0].sendtoaddress(blinded_addr, 1)
         self.nodes[0].sendtoaddress(blinded_addr, 3)
         unspent = self.nodes[0].listunspent(0, 0)
-        rawtx = self.nodes[0].createrawtransaction([{"txid":unspent[0]["txid"], "vout":unspent[0]["vout"]}, {"txid":unspent[1]["txid"], "vout":unspent[1]["vout"]}], {addr:unspent[0]["amount"]+unspent[1]["amount"]-Decimal("0.2"), "fee":Decimal("0.2")})
+        rawtx = self.nodes[0].createrawtransaction(
+                [
+                    {"txid":unspent[0]["txid"], "vout":unspent[0]["vout"]},
+                    {"txid":unspent[1]["txid"], "vout":unspent[1]["vout"]}
+                ],
+                [
+                    {addr:unspent[0]["amount"]+unspent[1]["amount"]-Decimal("0.2")},
+                    {"fee":Decimal("0.2")}
+                ])
         # Blinding will fail with 2 blinded inputs and 0 blinded outputs
         # since it has no notion of a wallet to fill in a 0-value OP_RETURN output
         try:
@@ -624,7 +697,15 @@ class CTTest (BitcoinTestFramework):
             pass
 
         # Blinded destination added, can blind, sign and send
-        rawtx = self.nodes[0].createrawtransaction([{"txid":unspent[0]["txid"], "vout":unspent[0]["vout"]}, {"txid":unspent[1]["txid"], "vout":unspent[1]["vout"]}], {blinded_addr:unspent[0]["amount"]+unspent[1]["amount"]-Decimal("0.002"), "fee":Decimal("0.002")})
+        rawtx = self.nodes[0].createrawtransaction(
+                [
+                    {"txid":unspent[0]["txid"], "vout":unspent[0]["vout"]},
+                    {"txid":unspent[1]["txid"], "vout":unspent[1]["vout"]}
+                ],
+                [
+                    {blinded_addr:unspent[0]["amount"]+unspent[1]["amount"]-Decimal("0.002")},
+                    {"fee":Decimal("0.002")}
+                ])
         signtx = self.nodes[0].signrawtransactionwithwallet(rawtx)
 
         try:
@@ -648,14 +729,14 @@ class CTTest (BitcoinTestFramework):
         # Test fundrawtransaction with multiple assets
         issue = self.nodes[0].issueasset(1, 0)
         assetaddr = self.nodes[0].getnewaddress()
-        rawtx = self.nodes[0].createrawtransaction([], {assetaddr:1, self.nodes[0].getnewaddress():2}, 0, False, {assetaddr:issue["asset"]})
+        rawtx = self.nodes[0].createrawtransaction([], [{assetaddr:1, "asset": issue["asset"]}, {self.nodes[0].getnewaddress():2}], 0, False)
         funded = self.nodes[0].fundrawtransaction(rawtx)
         blinded = self.nodes[0].blindrawtransaction(funded["hex"])
         signed = self.nodes[0].signrawtransactionwithwallet(blinded)
         txid = self.nodes[0].sendrawtransaction(signed["hex"])
 
         # Test fundrawtransaction with multiple inputs, creating > vout.size change
-        rawtx = self.nodes[0].createrawtransaction([{"txid":txid, "vout":0}, {"txid":txid, "vout":1}], {self.nodes[0].getnewaddress():5})
+        rawtx = self.nodes[0].createrawtransaction([{"txid":txid, "vout":0}, {"txid":txid, "vout":1}], [{self.nodes[0].getnewaddress():5}])
         funded = self.nodes[0].fundrawtransaction(rawtx)
         blinded = self.nodes[0].blindrawtransaction(funded["hex"])
         signed = self.nodes[0].signrawtransactionwithwallet(blinded)
@@ -672,11 +753,11 @@ class CTTest (BitcoinTestFramework):
         txid = self.nodes[0].sendtoaddress(unblinded, self.nodes[0].getbalance()["bitcoin"], "", "", True)
         outputs = self.nodes[0].getrawtransaction(txid, 1)["vout"]
         assert_equal(len(outputs), 3)
-        assert("value" in outputs[0] and "value" in outputs[1] and "value" in outputs[2])
+        assert "value" in outputs[0] and "value" in outputs[1] and "value" in outputs[2]
         assert_equal(outputs[2]["scriptPubKey"]["type"], 'nulldata')
 
         # Test burn argument in createrawtransaction
-        raw_burn1 = self.nodes[0].createrawtransaction([], {self.nodes[0].getnewaddress():1, "burn":2})
+        raw_burn1 = self.nodes[0].createrawtransaction([], [{self.nodes[0].getnewaddress():1}, {"burn":2}])
         decode_burn1 = self.nodes[0].decoderawtransaction(raw_burn1)
         assert_equal(len(decode_burn1["vout"]), 2)
         found_pay = False
@@ -686,11 +767,11 @@ class CTTest (BitcoinTestFramework):
                 found_burn = True
                 if output["asset"] != self.nodes[0].dumpassetlabels()["bitcoin"]:
                     raise Exception("Burn should have been bitcoin(policyAsset)")
-            if output["scriptPubKey"]["type"] == "scripthash":
+            if output["scriptPubKey"]["type"] == "witness_v0_keyhash":
                 found_pay = True
-        assert(found_pay and found_burn)
+        assert found_pay and found_burn
 
-        raw_burn2 = self.nodes[0].createrawtransaction([], {self.nodes[0].getnewaddress():1, "burn":2}, 101, False, {"burn":"deadbeef"*8})
+        raw_burn2 = self.nodes[0].createrawtransaction([], [{self.nodes[0].getnewaddress():1}, {"burn":2, "asset": "deadbeef"*8}], 101, False)
         decode_burn2 = self.nodes[0].decoderawtransaction(raw_burn2)
         assert_equal(len(decode_burn2["vout"]), 2)
         found_pay = False
@@ -700,9 +781,9 @@ class CTTest (BitcoinTestFramework):
                 found_burn = True
                 if output["asset"] != "deadbeef"*8:
                     raise Exception("Burn should have been deadbeef")
-            if output["scriptPubKey"]["type"] == "scripthash":
+            if output["scriptPubKey"]["type"] == "witness_v0_keyhash":
                 found_pay = True
-        assert(found_pay and found_burn)
+        assert found_pay and found_burn
 
         # TODO: signrawtransactionwith{wallet, key} with confidential segwit input given as previous transaction arg
 

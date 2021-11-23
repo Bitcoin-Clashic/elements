@@ -1,13 +1,15 @@
-/**********************************************************************
- * Copyright (c) 2014 Pieter Wuille                                   *
- * Distributed under the MIT software license, see the accompanying   *
- * file COPYING or http://www.opensource.org/licenses/mit-license.php.*
- **********************************************************************/
+/***********************************************************************
+ * Copyright (c) 2014 Pieter Wuille                                    *
+ * Distributed under the MIT software license, see the accompanying    *
+ * file COPYING or https://www.opensource.org/licenses/mit-license.php.*
+ ***********************************************************************/
 
 #ifndef SECP256K1_SCALAR_REPR_IMPL_H
 #define SECP256K1_SCALAR_REPR_IMPL_H
 
 #include <string.h>
+
+#include "modinv32_impl.h"
 
 /* Limbs of the secp256k1 order. */
 #define SECP256K1_N_0 ((uint32_t)0xD0364141UL)
@@ -284,9 +286,9 @@ static int secp256k1_scalar_cond_negate(secp256k1_scalar *r, int flag) {
         tl = t; \
     } \
     c0 += tl;                 /* overflow is handled on the next line */ \
-    th += (c0 < tl) ? 1 : 0;  /* at most 0xFFFFFFFF */ \
+    th += (c0 < tl);          /* at most 0xFFFFFFFF */ \
     c1 += th;                 /* overflow is handled on the next line */ \
-    c2 += (c1 < th) ? 1 : 0;  /* never overflows by contract (verified in the next line) */ \
+    c2 += (c1 < th);          /* never overflows by contract (verified in the next line) */ \
     VERIFY_CHECK((c1 >= th) || (c2 != 0)); \
 }
 
@@ -299,46 +301,24 @@ static int secp256k1_scalar_cond_negate(secp256k1_scalar *r, int flag) {
         tl = t; \
     } \
     c0 += tl;                 /* overflow is handled on the next line */ \
-    th += (c0 < tl) ? 1 : 0;  /* at most 0xFFFFFFFF */ \
+    th += (c0 < tl);          /* at most 0xFFFFFFFF */ \
     c1 += th;                 /* never overflows by contract (verified in the next line) */ \
     VERIFY_CHECK(c1 >= th); \
-}
-
-/** Add 2*a*b to the number defined by (c0,c1,c2). c2 must never overflow. */
-#define muladd2(a,b) { \
-    uint32_t tl, th, th2, tl2; \
-    { \
-        uint64_t t = (uint64_t)a * b; \
-        th = t >> 32;               /* at most 0xFFFFFFFE */ \
-        tl = t; \
-    } \
-    th2 = th + th;                  /* at most 0xFFFFFFFE (in case th was 0x7FFFFFFF) */ \
-    c2 += (th2 < th) ? 1 : 0;       /* never overflows by contract (verified the next line) */ \
-    VERIFY_CHECK((th2 >= th) || (c2 != 0)); \
-    tl2 = tl + tl;                  /* at most 0xFFFFFFFE (in case the lowest 63 bits of tl were 0x7FFFFFFF) */ \
-    th2 += (tl2 < tl) ? 1 : 0;      /* at most 0xFFFFFFFF */ \
-    c0 += tl2;                      /* overflow is handled on the next line */ \
-    th2 += (c0 < tl2) ? 1 : 0;      /* second overflow is handled on the next line */ \
-    c2 += (c0 < tl2) & (th2 == 0);  /* never overflows by contract (verified the next line) */ \
-    VERIFY_CHECK((c0 >= tl2) || (th2 != 0) || (c2 != 0)); \
-    c1 += th2;                      /* overflow is handled on the next line */ \
-    c2 += (c1 < th2) ? 1 : 0;       /* never overflows by contract (verified the next line) */ \
-    VERIFY_CHECK((c1 >= th2) || (c2 != 0)); \
 }
 
 /** Add a to the number defined by (c0,c1,c2). c2 must never overflow. */
 #define sumadd(a) { \
     unsigned int over; \
     c0 += (a);                  /* overflow is handled on the next line */ \
-    over = (c0 < (a)) ? 1 : 0; \
+    over = (c0 < (a)); \
     c1 += over;                 /* overflow is handled on the next line */ \
-    c2 += (c1 < over) ? 1 : 0;  /* never overflows by contract */ \
+    c2 += (c1 < over);          /* never overflows by contract */ \
 }
 
 /** Add a to the number defined by (c0,c1). c1 must never overflow, c2 must be zero. */
 #define sumadd_fast(a) { \
     c0 += (a);                 /* overflow is handled on the next line */ \
-    c1 += (c0 < (a)) ? 1 : 0;  /* never overflows by contract (verified the next line) */ \
+    c1 += (c0 < (a));          /* never overflows by contract (verified the next line) */ \
     VERIFY_CHECK((c1 != 0) | (c0 >= (a))); \
     VERIFY_CHECK(c2 == 0); \
 }
@@ -589,71 +569,10 @@ static void secp256k1_scalar_mul_512(uint32_t *l, const secp256k1_scalar *a, con
     l[15] = c0;
 }
 
-static void secp256k1_scalar_sqr_512(uint32_t *l, const secp256k1_scalar *a) {
-    /* 96 bit accumulator. */
-    uint32_t c0 = 0, c1 = 0, c2 = 0;
-
-    /* l[0..15] = a[0..7]^2. */
-    muladd_fast(a->d[0], a->d[0]);
-    extract_fast(l[0]);
-    muladd2(a->d[0], a->d[1]);
-    extract(l[1]);
-    muladd2(a->d[0], a->d[2]);
-    muladd(a->d[1], a->d[1]);
-    extract(l[2]);
-    muladd2(a->d[0], a->d[3]);
-    muladd2(a->d[1], a->d[2]);
-    extract(l[3]);
-    muladd2(a->d[0], a->d[4]);
-    muladd2(a->d[1], a->d[3]);
-    muladd(a->d[2], a->d[2]);
-    extract(l[4]);
-    muladd2(a->d[0], a->d[5]);
-    muladd2(a->d[1], a->d[4]);
-    muladd2(a->d[2], a->d[3]);
-    extract(l[5]);
-    muladd2(a->d[0], a->d[6]);
-    muladd2(a->d[1], a->d[5]);
-    muladd2(a->d[2], a->d[4]);
-    muladd(a->d[3], a->d[3]);
-    extract(l[6]);
-    muladd2(a->d[0], a->d[7]);
-    muladd2(a->d[1], a->d[6]);
-    muladd2(a->d[2], a->d[5]);
-    muladd2(a->d[3], a->d[4]);
-    extract(l[7]);
-    muladd2(a->d[1], a->d[7]);
-    muladd2(a->d[2], a->d[6]);
-    muladd2(a->d[3], a->d[5]);
-    muladd(a->d[4], a->d[4]);
-    extract(l[8]);
-    muladd2(a->d[2], a->d[7]);
-    muladd2(a->d[3], a->d[6]);
-    muladd2(a->d[4], a->d[5]);
-    extract(l[9]);
-    muladd2(a->d[3], a->d[7]);
-    muladd2(a->d[4], a->d[6]);
-    muladd(a->d[5], a->d[5]);
-    extract(l[10]);
-    muladd2(a->d[4], a->d[7]);
-    muladd2(a->d[5], a->d[6]);
-    extract(l[11]);
-    muladd2(a->d[5], a->d[7]);
-    muladd(a->d[6], a->d[6]);
-    extract(l[12]);
-    muladd2(a->d[6], a->d[7]);
-    extract(l[13]);
-    muladd_fast(a->d[7], a->d[7]);
-    extract_fast(l[14]);
-    VERIFY_CHECK(c1 == 0);
-    l[15] = c0;
-}
-
 #undef sumadd
 #undef sumadd_fast
 #undef muladd
 #undef muladd_fast
-#undef muladd2
 #undef extract
 #undef extract_fast
 
@@ -679,32 +598,24 @@ static int secp256k1_scalar_shr_int(secp256k1_scalar *r, int n) {
     return ret;
 }
 
-static void secp256k1_scalar_sqr(secp256k1_scalar *r, const secp256k1_scalar *a) {
-    uint32_t l[16];
-    secp256k1_scalar_sqr_512(l, a);
-    secp256k1_scalar_reduce_512(r, l);
-}
-
-#ifdef USE_ENDOMORPHISM
-static void secp256k1_scalar_split_128(secp256k1_scalar *r1, secp256k1_scalar *r2, const secp256k1_scalar *a) {
-    r1->d[0] = a->d[0];
-    r1->d[1] = a->d[1];
-    r1->d[2] = a->d[2];
-    r1->d[3] = a->d[3];
+static void secp256k1_scalar_split_128(secp256k1_scalar *r1, secp256k1_scalar *r2, const secp256k1_scalar *k) {
+    r1->d[0] = k->d[0];
+    r1->d[1] = k->d[1];
+    r1->d[2] = k->d[2];
+    r1->d[3] = k->d[3];
     r1->d[4] = 0;
     r1->d[5] = 0;
     r1->d[6] = 0;
     r1->d[7] = 0;
-    r2->d[0] = a->d[4];
-    r2->d[1] = a->d[5];
-    r2->d[2] = a->d[6];
-    r2->d[3] = a->d[7];
+    r2->d[0] = k->d[4];
+    r2->d[1] = k->d[5];
+    r2->d[2] = k->d[6];
+    r2->d[3] = k->d[7];
     r2->d[4] = 0;
     r2->d[5] = 0;
     r2->d[6] = 0;
     r2->d[7] = 0;
 }
-#endif
 
 SECP256K1_INLINE static int secp256k1_scalar_eq(const secp256k1_scalar *a, const secp256k1_scalar *b) {
     return ((a->d[0] ^ b->d[0]) | (a->d[1] ^ b->d[1]) | (a->d[2] ^ b->d[2]) | (a->d[3] ^ b->d[3]) | (a->d[4] ^ b->d[4]) | (a->d[5] ^ b->d[5]) | (a->d[6] ^ b->d[6]) | (a->d[7] ^ b->d[7])) == 0;
@@ -731,6 +642,21 @@ SECP256K1_INLINE static void secp256k1_scalar_mul_shift_var(secp256k1_scalar *r,
     secp256k1_scalar_cadd_bit(r, 0, (l[(shift - 1) >> 5] >> ((shift - 1) & 0x1f)) & 1);
 }
 
+static SECP256K1_INLINE void secp256k1_scalar_cmov(secp256k1_scalar *r, const secp256k1_scalar *a, int flag) {
+    uint32_t mask0, mask1;
+    VG_CHECK_VERIFY(r->d, sizeof(r->d));
+    mask0 = flag + ~((uint32_t)0);
+    mask1 = ~mask0;
+    r->d[0] = (r->d[0] & mask0) | (a->d[0] & mask1);
+    r->d[1] = (r->d[1] & mask0) | (a->d[1] & mask1);
+    r->d[2] = (r->d[2] & mask0) | (a->d[2] & mask1);
+    r->d[3] = (r->d[3] & mask0) | (a->d[3] & mask1);
+    r->d[4] = (r->d[4] & mask0) | (a->d[4] & mask1);
+    r->d[5] = (r->d[5] & mask0) | (a->d[5] & mask1);
+    r->d[6] = (r->d[6] & mask0) | (a->d[6] & mask1);
+    r->d[7] = (r->d[7] & mask0) | (a->d[7] & mask1);
+}
+
 #define ROTL32(x,n) ((x) << (n) | (x) >> (32-(n)))
 #define QUARTERROUND(a,b,c,d) \
   a += b; d = ROTL32(d ^ a, 16); \
@@ -738,11 +664,9 @@ SECP256K1_INLINE static void secp256k1_scalar_mul_shift_var(secp256k1_scalar *r,
   a += b; d = ROTL32(d ^ a, 8); \
   c += d; b = ROTL32(b ^ c, 7);
 
-#ifdef WORDS_BIGENDIAN
+#if defined(SECP256K1_BIG_ENDIAN)
 #define LE32(p) ((((p) & 0xFF) << 24) | (((p) & 0xFF00) << 8) | (((p) & 0xFF0000) >> 8) | (((p) & 0xFF000000) >> 24))
-#define BE32(p) (p)
-#else
-#define BE32(p) ((((p) & 0xFF) << 24) | (((p) & 0xFF00) << 8) | (((p) & 0xFF0000) >> 8) | (((p) & 0xFF000000) >> 24))
+#elif defined(SECP256K1_LITTLE_ENDIAN)
 #define LE32(p) (p)
 #endif
 
@@ -801,22 +725,22 @@ static void secp256k1_scalar_chacha20(secp256k1_scalar *r1, secp256k1_scalar *r2
         x14 += 0;
         x15 += over_count;
 
-        r1->d[7] = LE32(x0);
-        r1->d[6] = LE32(x1);
-        r1->d[5] = LE32(x2);
-        r1->d[4] = LE32(x3);
-        r1->d[3] = LE32(x4);
-        r1->d[2] = LE32(x5);
-        r1->d[1] = LE32(x6);
-        r1->d[0] = LE32(x7);
-        r2->d[7] = LE32(x8);
-        r2->d[6] = LE32(x9);
-        r2->d[5] = LE32(x10);
-        r2->d[4] = LE32(x11);
-        r2->d[3] = LE32(x12);
-        r2->d[2] = LE32(x13);
-        r2->d[1] = LE32(x14);
-        r2->d[0] = LE32(x15);
+        r1->d[7] = x0;
+        r1->d[6] = x1;
+        r1->d[5] = x2;
+        r1->d[4] = x3;
+        r1->d[3] = x4;
+        r1->d[2] = x5;
+        r1->d[1] = x6;
+        r1->d[0] = x7;
+        r2->d[7] = x8;
+        r2->d[6] = x9;
+        r2->d[5] = x10;
+        r2->d[4] = x11;
+        r2->d[3] = x12;
+        r2->d[2] = x13;
+        r2->d[1] = x14;
+        r2->d[0] = x15;
 
         over1 = secp256k1_scalar_check_overflow(r1);
         over2 = secp256k1_scalar_check_overflow(r2);
@@ -826,7 +750,94 @@ static void secp256k1_scalar_chacha20(secp256k1_scalar *r1, secp256k1_scalar *r2
 
 #undef ROTL32
 #undef QUARTERROUND
-#undef BE32
 #undef LE32
+
+static void secp256k1_scalar_from_signed30(secp256k1_scalar *r, const secp256k1_modinv32_signed30 *a) {
+    const uint32_t a0 = a->v[0], a1 = a->v[1], a2 = a->v[2], a3 = a->v[3], a4 = a->v[4],
+                   a5 = a->v[5], a6 = a->v[6], a7 = a->v[7], a8 = a->v[8];
+
+    /* The output from secp256k1_modinv32{_var} should be normalized to range [0,modulus), and
+     * have limbs in [0,2^30). The modulus is < 2^256, so the top limb must be below 2^(256-30*8).
+     */
+    VERIFY_CHECK(a0 >> 30 == 0);
+    VERIFY_CHECK(a1 >> 30 == 0);
+    VERIFY_CHECK(a2 >> 30 == 0);
+    VERIFY_CHECK(a3 >> 30 == 0);
+    VERIFY_CHECK(a4 >> 30 == 0);
+    VERIFY_CHECK(a5 >> 30 == 0);
+    VERIFY_CHECK(a6 >> 30 == 0);
+    VERIFY_CHECK(a7 >> 30 == 0);
+    VERIFY_CHECK(a8 >> 16 == 0);
+
+    r->d[0] = a0       | a1 << 30;
+    r->d[1] = a1 >>  2 | a2 << 28;
+    r->d[2] = a2 >>  4 | a3 << 26;
+    r->d[3] = a3 >>  6 | a4 << 24;
+    r->d[4] = a4 >>  8 | a5 << 22;
+    r->d[5] = a5 >> 10 | a6 << 20;
+    r->d[6] = a6 >> 12 | a7 << 18;
+    r->d[7] = a7 >> 14 | a8 << 16;
+
+#ifdef VERIFY
+    VERIFY_CHECK(secp256k1_scalar_check_overflow(r) == 0);
+#endif
+}
+
+static void secp256k1_scalar_to_signed30(secp256k1_modinv32_signed30 *r, const secp256k1_scalar *a) {
+    const uint32_t M30 = UINT32_MAX >> 2;
+    const uint32_t a0 = a->d[0], a1 = a->d[1], a2 = a->d[2], a3 = a->d[3],
+                   a4 = a->d[4], a5 = a->d[5], a6 = a->d[6], a7 = a->d[7];
+
+#ifdef VERIFY
+    VERIFY_CHECK(secp256k1_scalar_check_overflow(a) == 0);
+#endif
+
+    r->v[0] =  a0                   & M30;
+    r->v[1] = (a0 >> 30 | a1 <<  2) & M30;
+    r->v[2] = (a1 >> 28 | a2 <<  4) & M30;
+    r->v[3] = (a2 >> 26 | a3 <<  6) & M30;
+    r->v[4] = (a3 >> 24 | a4 <<  8) & M30;
+    r->v[5] = (a4 >> 22 | a5 << 10) & M30;
+    r->v[6] = (a5 >> 20 | a6 << 12) & M30;
+    r->v[7] = (a6 >> 18 | a7 << 14) & M30;
+    r->v[8] =  a7 >> 16;
+}
+
+static const secp256k1_modinv32_modinfo secp256k1_const_modinfo_scalar = {
+    {{0x10364141L, 0x3F497A33L, 0x348A03BBL, 0x2BB739ABL, -0x146L, 0, 0, 0, 65536}},
+    0x2A774EC1L
+};
+
+static void secp256k1_scalar_inverse(secp256k1_scalar *r, const secp256k1_scalar *x) {
+    secp256k1_modinv32_signed30 s;
+#ifdef VERIFY
+    int zero_in = secp256k1_scalar_is_zero(x);
+#endif
+    secp256k1_scalar_to_signed30(&s, x);
+    secp256k1_modinv32(&s, &secp256k1_const_modinfo_scalar);
+    secp256k1_scalar_from_signed30(r, &s);
+
+#ifdef VERIFY
+    VERIFY_CHECK(secp256k1_scalar_is_zero(r) == zero_in);
+#endif
+}
+
+static void secp256k1_scalar_inverse_var(secp256k1_scalar *r, const secp256k1_scalar *x) {
+    secp256k1_modinv32_signed30 s;
+#ifdef VERIFY
+    int zero_in = secp256k1_scalar_is_zero(x);
+#endif
+    secp256k1_scalar_to_signed30(&s, x);
+    secp256k1_modinv32_var(&s, &secp256k1_const_modinfo_scalar);
+    secp256k1_scalar_from_signed30(r, &s);
+
+#ifdef VERIFY
+    VERIFY_CHECK(secp256k1_scalar_is_zero(r) == zero_in);
+#endif
+}
+
+SECP256K1_INLINE static int secp256k1_scalar_is_even(const secp256k1_scalar *a) {
+    return !(a->d[0] & 1);
+}
 
 #endif /* SECP256K1_SCALAR_REPR_IMPL_H */
